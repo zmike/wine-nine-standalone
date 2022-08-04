@@ -27,19 +27,23 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <dlfcn.h>
+#include <inttypes.h>
 
 #include "../common/debug.h"
 #include "../common/library.h"
 #include "backend.h"
 #include "wndproc.h"
 #include "xcb_present.h"
+#include <X11/Xlib-xcb.h>
 
 #ifndef D3DPRESENT_DONOTWAIT
 #define D3DPRESENT_DONOTWAIT      0x00000001
 #endif
 
 #define D3DADAPTER_DRIVER_PRESENT_VERSION_MAJOR 1
-#if defined (ID3DPresent_SetPresentParameters2)
+#if defined (ID3DPresent_GetWindowHWND)
+#define D3DADAPTER_DRIVER_PRESENT_VERSION_MINOR 5
+#elif defined (ID3DPresent_SetPresentParameters2)
 /* version 1.4 doesn't introduce a new member, but expects
  * SetCursorPosition() calls for every position update
  */
@@ -1385,6 +1389,18 @@ static HRESULT WINAPI DRIPresent_WaitBufferReleaseEvent( struct DRIPresent *This
 }
 #endif
 
+#if D3DADAPTER_DRIVER_PRESENT_VERSION_MINOR >= 5
+static HRESULT WINAPI
+DRIPresent_GetWindowHWND(struct DRIPresent *This, HWND hWnd, void **pDisplay, void **pWindow, int *type)
+{
+    HWND draw_window = This->params.hDeviceWindow ? This->params.hDeviceWindow : This->focus_wnd;
+
+    get_wine_drawable_from_wnd(draw_window, pWindow, NULL);
+    *pDisplay = XGetXCBConnection(This->gdi_display);
+    return D3D_OK;
+}
+#endif
+
 static ID3DPresentVtbl DRIPresent_vtable = {
     (void *)DRIPresent_QueryInterface,
     (void *)DRIPresent_AddRef,
@@ -1415,6 +1431,9 @@ static ID3DPresentVtbl DRIPresent_vtable = {
     (void *)DRIPresent_SetPresentParameters2,
     (void *)DRIPresent_IsBufferReleased,
     (void *)DRIPresent_WaitBufferReleaseEvent,
+#endif
+#if D3DADAPTER_DRIVER_PRESENT_VERSION_MINOR >= 5
+    (void *)DRIPresent_GetWindowHWND,
 #endif
 };
 
@@ -1517,7 +1536,7 @@ static HRESULT present_create(Display *gdi_display, const WCHAR *devname,
         return D3DERR_DRIVERINTERNALERROR;
     }
 
-    if (!dri_backend->funcs->init(dri_backend->priv))
+    if (dri_backend && !dri_backend->funcs->init(dri_backend->priv))
     {
         HeapFree(GetProcessHeap(), 0, This);
         return D3DERR_DRIVERINTERNALERROR;
@@ -1694,7 +1713,7 @@ HRESULT present_create_adapter9(Display *gdi_display, HDC hdc,
         struct dri_backend *dri_backend, ID3DAdapter9 **out)
 {
     HRESULT hr;
-    int fd;
+    int fd = -1;
 
     if (!d3d9_drm)
     {
@@ -1705,15 +1724,18 @@ HRESULT present_create_adapter9(Display *gdi_display, HDC hdc,
     if (!get_wine_drawable_from_dc(hdc, NULL))
         return D3DERR_DRIVERINTERNALERROR;
 
-    fd = dri_backend->funcs->get_fd(dri_backend->priv);
+    BOOL invalid_fd = FALSE;
+    if (dri_backend)
+       fd = dri_backend->funcs->get_fd(dri_backend->priv);
     if (fd < 0) {
-        ERR("Got invalid fd from backend (fd=%d)\n", fd);
-        return D3DERR_DRIVERINTERNALERROR;
+        invalid_fd = TRUE;
     }
 
     hr = d3d9_drm->create_adapter(fd, out);
     if (FAILED(hr))
     {
+        if (invalid_fd)
+            ERR("Got invalid fd from backend (fd=%d)\n", fd);
         ERR("Unable to create ID3DAdapter9 (fd=%d)\n", fd);
         return hr;
     }
@@ -1773,12 +1795,6 @@ BOOL present_has_d3dadapter(Display *gdi_display)
     if (!PRESENTCheckExtension(gdi_display, 1, 0))
     {
         ERR("Unable to query PRESENT.\n");
-        goto cleanup;
-    }
-
-    if (!backend_probe(gdi_display))
-    {
-        ERR("No available backends.\n");
         goto cleanup;
     }
 

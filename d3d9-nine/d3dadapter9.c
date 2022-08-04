@@ -718,6 +718,8 @@ static HRESULT fill_groups(struct d3dadapter9 *This)
     dd.cb = sizeof(dd);
     dm.dmSize = sizeof(dm);
 
+    BOOL no_backends = !backend_probe(This->gdi_display);
+
     for (i = 0; EnumDisplayDevicesW(NULL, i, &dd, 0); ++i)
     {
         struct adapter_group *group = add_group(This);
@@ -735,11 +737,13 @@ static HRESULT fill_groups(struct d3dadapter9 *This)
             goto end_group;
         }
 
-        group->dri_backend = backend_create(This->gdi_display, DefaultScreen(This->gdi_display));
-        if (!group->dri_backend)
-        {
-            ERR("Unable to open backend for display %d.\n", i);
-            goto end_group;
+        if (!no_backends) {
+            group->dri_backend = backend_create(This->gdi_display, DefaultScreen(This->gdi_display));
+            if (!group->dri_backend)
+            {
+                ERR("Unable to open backend for display %d.\n", i);
+                goto end_group;
+            }
         }
 
         hr = present_create_adapter9(This->gdi_display, hdc, group->dri_backend,
